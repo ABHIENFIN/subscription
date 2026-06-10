@@ -1,0 +1,205 @@
+// Prisma schema for Subscription Microservice
+// Multi-tenant model with RBAC, plans, subscriptions, and payment tracking
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// TENANTS
+// ============================================
+model Tenant {
+  id                  String   @id @default(uuid())
+  name                String
+  slug                String   @unique
+  domain              String?  @unique
+  status              TenantStatus @default(ACTIVE)
+  paymentProvider     String?  // 'stripe' | 'paypal' | etc.
+  gatewayConfiguredAt DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  users          User[]
+  plans          Plan[]
+  subscriptions  Subscription[]
+  invoices       Invoice[]
+
+  @@map("tenants")
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+// ============================================
+// USERS
+// ============================================
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  firstName    String?
+  lastName     String?
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Platform-level (no tenantId) vs tenant-level
+  tenantId     String?
+  tenant       Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  roles        UserRole[]
+  subscriptions Subscription[]
+
+  @@index([tenantId])
+  @@index([email])
+  @@map("users")
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+  DELETED
+}
+
+// ============================================
+// ROLES & RBAC
+// ============================================
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique // 'super_admin', 'tenant_owner', etc.
+  scope       RoleScope
+  description String?
+  createdAt   DateTime @default(now())
+
+  userRoles   UserRole[]
+
+  @@map("roles")
+}
+
+enum RoleScope {
+  PLATFORM
+  TENANT
+}
+
+model UserRole {
+  id     String @id @default(uuid())
+  userId String
+  roleId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([userId])
+  @@map("user_roles")
+}
+
+// ============================================
+// PLANS
+// ============================================
+model Plan {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?
+  amount          Decimal  @db.Decimal(10, 2)
+  currency        String   @default("USD")
+  interval        BillingInterval
+  intervalCount   Int      @default(1)
+  trialDays       Int      @default(0)
+  gatewayPlanId   String?  // Provider-side plan ID (Stripe price ID, etc.)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  subscriptions   Subscription[]
+
+  @@index([tenantId])
+  @@map("plans")
+}
+
+enum BillingInterval {
+  DAY
+  WEEK
+  MONTH
+  YEAR
+}
+
+// ============================================
+// SUBSCRIPTIONS
+// ============================================
+model Subscription {
+  id                    String   @id @default(uuid())
+  tenantId              String
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId                String
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planId                String
+  plan                  Plan     @relation(fields: [planId], references: [id])
+  status                SubscriptionStatus @default(ACTIVE)
+  gatewayProvider       String   // 'stripe', 'paypal', etc.
+  gatewaySubscriptionId String?  // Provider-side ID
+  gatewayCustomerId     String?
+  currentPeriodStart    DateTime
+  currentPeriodEnd      DateTime
+  cancelAtPeriodEnd     Boolean  @default(false)
+  cancelledAt           DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  invoices              Invoice[]
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELLED
+  PAUSED
+  EXPIRED
+}
+
+// ============================================
+// INVOICES
+// ============================================
+model Invoice {
+  id                String   @id @default(uuid())
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subscriptionId    String?
+  subscription      Subscription? @relation(fields: [subscriptionId], references: [id])
+  amount            Decimal  @db.Decimal(10, 2)
+  currency          String   @default("USD")
+  status            InvoiceStatus @default(PENDING)
+  gatewayInvoiceId  String?
+  paidAt            DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([subscriptionId])
+  @@index([status])
+  @@map("invoices")
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  VOID
+}
