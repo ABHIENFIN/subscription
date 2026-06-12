@@ -2,8 +2,11 @@ import express, { Express } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import swaggerUi from 'swagger-ui-express';
 import { appConfig } from './config/app.config';
 import { errorHandler } from './middleware/errorHandler.middleware';
+import { generateOpenApiDocument } from './docs/openapi';
+import { getRedocHtml } from './docs/redoc.html';
 
 import authRoutes from './modules/auth/auth.routes';
 import tenantRoutes from './modules/tenants/tenant.routes';
@@ -32,6 +35,11 @@ export function createApp(): Express {
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
+
+  const openApiDocument = generateOpenApiDocument();
+  app.get('/openapi.json', (_req, res) => res.json(openApiDocument));
+  app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiDocument, { customSiteTitle: 'Subscription Service API' }));
+  app.get('/redoc', (_req, res) => res.type('html').send(getRedocHtml()));
 
   app.use(`${appConfig.apiPrefix}/auth`, authRoutes);
   app.use(`${appConfig.apiPrefix}/tenants`, tenantRoutes);
