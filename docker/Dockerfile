@@ -1,6 +1,12 @@
-FROM node:20-alpine
+FROM node:20-bookworm-slim
 
 WORKDIR /app
+
+# Prisma needs both OpenSSL 3 (default) and the legacy libssl1.1 for its
+# query engine binary on this Prisma version.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json* ./
 RUN npm ci || npm install
