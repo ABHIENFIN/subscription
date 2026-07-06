@@ -1,21 +1,3 @@
-export enum RoleScope {
-  PLATFORM = 'PLATFORM',
-  TENANT = 'TENANT',
-}
-
-export enum PlatformRole {
-  SUPER_ADMIN = 'super_admin',
-  PLATFORM_ADMIN = 'platform_admin',
-}
-
-export enum TenantRole {
-  TENANT_OWNER = 'tenant_owner',
-  TENANT_ADMIN = 'tenant_admin',
-  DEVELOPER = 'developer',
-  BILLING_MANAGER = 'billing_manager',
-  VIEWER = 'viewer',
-}
-
 export enum SubscriptionStatus {
   ACTIVE = 'ACTIVE',
   TRIALING = 'TRIALING',

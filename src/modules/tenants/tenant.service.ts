@@ -1,51 +1,91 @@
-import { tenantRepository } from './tenant.repository';
-import { CreateTenantDto, UpdateTenantDto } from './tenant.dto';
-import { ConflictException, NotFoundException } from '../../common/exceptions';
+import { randomUUID } from 'crypto';
+import { TenantResponse } from './tenant.dto';
 
-export class TenantService {
-  async create(dto: CreateTenantDto) {
-    const existing = await tenantRepository.findBySlug(dto.slug);
-    if (existing) {
-      throw new ConflictException('Tenant with this slug already exists');
-    }
-    return tenantRepository.create({
-      name: dto.name,
-      slug: dto.slug,
-      domain: dto.domain,
-    });
-  }
+const now = () => new Date().toISOString();
 
-  async findById(id: string) {
-    const tenant = await tenantRepository.findById(id);
-    if (!tenant) {
-      throw new NotFoundException('Tenant not found');
+const seed: TenantResponse[] = [
+  {
+    id: '00000000-0000-0000-0000-0000000000ac',
+    name: 'Acme',
+    slug: 'acme',
+    isActive: true,
+    createdAt: '2024-01-01T00:00:00.000Z',
+    updatedAt: '2024-01-01T00:00:00.000Z',
+  },
+  {
+    id: '00000000-0000-0000-0000-0000000000b0',
+    name: 'Globex',
+    slug: 'globex',
+    isActive: true,
+    createdAt: '2024-01-02T00:00:00.000Z',
+    updatedAt: '2024-01-02T00:00:00.000Z',
+  },
+];
+
+const store = new Map<string, TenantResponse>(seed.map((t) => [t.id, t]));
+
+export const tenantService = {
+  list({ skip = 0, take = 20 }: { skip?: number; take?: number } = {}): TenantResponse[] {
+    return Array.from(store.values())
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(skip, skip + take);
+  },
+
+  findById(id: string): TenantResponse | null {
+    return store.get(id) ?? null;
+  },
+
+  findBySlug(slug: string): TenantResponse | null {
+    for (const tenant of store.values()) {
+      if (tenant.slug === slug) return tenant;
     }
+    return null;
+  },
+
+  create({ name, slug }: { name: string; slug: string }): TenantResponse {
+    if (this.findBySlug(slug)) {
+      const err = new Error('Tenant with this slug already exists');
+      (err as Error & { code: string }).code = 'UNIQUE_VIOLATION';
+      throw err;
+    }
+    const tenant: TenantResponse = {
+      id: randomUUID(),
+      name,
+      slug,
+      isActive: true,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    store.set(tenant.id, tenant);
     return tenant;
-  }
+  },
 
-  async list(skip = 0, take = 20) {
-    return tenantRepository.findMany(skip, take);
-  }
-
-  async update(id: string, dto: UpdateTenantDto) {
-    const existing = await tenantRepository.findById(id);
-    if (!existing) {
-      throw new NotFoundException('Tenant not found');
+  update(id: string, patch: Partial<{ name: string; slug: string; isActive: boolean }>): TenantResponse | null {
+    const existing = store.get(id);
+    if (!existing) return null;
+    if (patch.slug && patch.slug !== existing.slug) {
+      if (this.findBySlug(patch.slug)) {
+        const err = new Error('Tenant with this slug already exists');
+        (err as Error & { code: string }).code = 'UNIQUE_VIOLATION';
+        throw err;
+      }
     }
-    return tenantRepository.update(id, {
-      ...(dto.name !== undefined ? { name: dto.name } : {}),
-      ...(dto.domain !== undefined ? { domain: dto.domain } : {}),
-      ...(dto.paymentProvider !== undefined ? { paymentProvider: dto.paymentProvider } : {}),
-    });
-  }
+    const updated: TenantResponse = {
+      ...existing,
+      ...(patch.name !== undefined ? { name: patch.name } : {}),
+      ...(patch.slug !== undefined ? { slug: patch.slug } : {}),
+      ...(patch.isActive !== undefined ? { isActive: patch.isActive } : {}),
+      updatedAt: now(),
+    };
+    store.set(id, updated);
+    return updated;
+  },
 
-  async delete(id: string) {
-    const existing = await tenantRepository.findById(id);
-    if (!existing) {
-      throw new NotFoundException('Tenant not found');
-    }
-    await tenantRepository.delete(id);
-  }
-}
+  delete(id: string): boolean {
+    return store.delete(id);
+  },
 
-export const tenantService = new TenantService();
+  deactivate(id: string): TenantResponse | null {
+    return this.update(id, { isActive: false });
+  },
+};

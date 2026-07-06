@@ -5,10 +5,18 @@ import {
   CreateSubscriptionDto,
   UpdateSubscriptionDto,
   CreateInvoiceDto,
+  CreateGatewayPlanDto,
+  CreateGatewayProductDto,
+  CreateGatewayPriceDto,
+  RecordUsageDto,
+  AddInvoiceItemDto,
   GatewayCustomer,
   GatewayPaymentMethod,
   GatewaySubscription,
   GatewayInvoice,
+  GatewayPlan,
+  GatewayProduct,
+  GatewayPrice,
   GatewayWebhookEvent,
 } from '../gateway.interface';
 
@@ -55,6 +63,78 @@ export class StripeGateway implements IPaymentGateway {
     };
   }
 
+  async createPlan(data: CreateGatewayPlanDto): Promise<GatewayPlan> {
+    const interval = data.interval.toLowerCase() as Stripe.PriceCreateParams.Recurring.Interval;
+    const intervalCount = data.intervalCount ?? 1;
+    const price = await this.stripe.prices.create({
+      unit_amount: data.amount,
+      currency: data.currency.toLowerCase(),
+      recurring: { interval, interval_count: intervalCount },
+      product_data: {
+        name: data.name,
+        metadata: data.metadata,
+      },
+    });
+    return {
+      id: price.id,
+      productId: typeof price.product === 'string' ? price.product : price.product.id,
+    };
+  }
+
+  async createProduct(data: CreateGatewayProductDto): Promise<GatewayProduct> {
+    const product = await this.stripe.products.create({
+      name: data.name,
+      description: data.description,
+      metadata: data.metadata,
+    });
+    return { id: product.id, name: product.name };
+  }
+
+  async createPrice(data: CreateGatewayPriceDto): Promise<GatewayPrice> {
+    if (data.type === 'RECURRING' && !data.interval) {
+      throw new Error('interval is required for RECURRING prices');
+    }
+    const params: Stripe.PriceCreateParams = {
+      product: data.productId,
+      unit_amount: data.amount,
+      currency: data.currency.toLowerCase(),
+      nickname: data.nickname,
+      metadata: data.metadata,
+    };
+    if (data.type === 'RECURRING') {
+      const usageType = data.usageType ?? 'LICENSED';
+      params.recurring = {
+        interval: data.interval!.toLowerCase() as Stripe.PriceCreateParams.Recurring.Interval,
+        interval_count: data.intervalCount ?? 1,
+        usage_type: usageType === 'METERED' ? 'metered' : 'licensed',
+        aggregate_usage: usageType === 'METERED' ? 'sum' : undefined,
+      };
+    }
+    const price = await this.stripe.prices.create(params);
+    return {
+      id: price.id,
+      productId: typeof price.product === 'string' ? price.product : price.product.id,
+      type: data.type,
+    };
+  }
+
+  async recordUsage(data: RecordUsageDto): Promise<void> {
+    await this.stripe.subscriptionItems.createUsageRecord(data.subscriptionItemId, {
+      quantity: data.quantity,
+      timestamp: data.timestamp ? Math.floor(data.timestamp.getTime() / 1000) : 'now',
+      action: data.action ?? 'increment',
+    });
+  }
+
+  async addInvoiceItem(data: AddInvoiceItemDto): Promise<void> {
+    await this.stripe.invoiceItems.create({
+      customer: data.customerId,
+      subscription: data.subscriptionId,
+      price: data.priceId,
+      quantity: data.quantity ?? 1,
+    });
+  }
+
   async attachPaymentMethod(customerId: string, token: string): Promise<GatewayPaymentMethod> {
     const pm = await this.stripe.paymentMethods.attach(token, { customer: customerId });
     return this.toGatewayPaymentMethod(pm);
@@ -79,11 +159,18 @@ export class StripeGateway implements IPaymentGateway {
       throw new Error('paymentMethodId (Stripe customer ID) is required');
     }
 
+    // Approach A — caller passes items[] explicitly (one per PlanPrice, including addons).
+    // Approach B callers still pass gatewayPlanId as a single item.
+    const items =
+      data.items && data.items.length > 0
+        ? data.items.map((it) => ({ price: it.gatewayPriceId, quantity: it.quantity }))
+        : data.gatewayPlanId
+          ? [{ price: data.gatewayPlanId }]
+          : (undefined as any);
+
     const subscription = await this.stripe.subscriptions.create({
       customer: customerId,
-      items: data.gatewayPlanId
-        ? [{ price: data.gatewayPlanId }]
-        : undefined,
+      items,
       payment_behavior: 'default_incomplete',
       payment_settings: { save_default_payment_method: 'on_subscription' },
       expand: ['latest_invoice.payment_intent'],
@@ -95,6 +182,11 @@ export class StripeGateway implements IPaymentGateway {
       status: subscription.status,
       currentPeriodStart: new Date(subscription.current_period_start * 1000),
       currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+      items: subscription.items.data.map((it) => ({
+        id: it.id,
+        priceId: typeof it.price === 'string' ? it.price : it.price.id,
+        quantity: it.quantity ?? undefined,
+      })),
     };
   }
 

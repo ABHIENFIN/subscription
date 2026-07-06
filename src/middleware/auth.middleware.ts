@@ -5,6 +5,17 @@ import { JwtPayload, AuthenticatedUser } from '../common/types';
 import { UnauthorizedException } from '../common/exceptions';
 
 export const authenticate = (req: Request, _res: Response, next: NextFunction): void => {
+  if (process.env.SKIP_AUTH === 'true' && process.env.NODE_ENV !== 'production') {
+    console.warn('[auth] SKIP_AUTH enabled — requests are unauthenticated (dev only)');
+    req.user = {
+      id: 'dev-user',
+      email: 'dev@local',
+      tenantId: req.header('x-tenant-id') ?? undefined,
+      roles: ['super_admin', 'tenant_owner', 'tenant_admin', 'billing_manager'],
+    };
+    return next();
+  }
+
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {

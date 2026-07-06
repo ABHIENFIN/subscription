@@ -1,10 +1,27 @@
 import { subscriptionRepository } from './subscription.repository';
+import { planPriceRepository } from '../plans/plan.repository';
 import { planService } from '../plans/plan.service';
-import { tenantRepository } from '../tenants/tenant.repository';
 import { getGateway } from '../../payments/gateway.factory';
-import { CreateSubscriptionDto, CancelSubscriptionDto } from './subscription.dto';
-import { NotFoundException, BadRequestException, ForbiddenException } from '../../common/exceptions';
-import { SubscriptionStatus } from '../../common/enums';
+import { CreateSubscriptionDto, CancelSubscriptionDto, RecordUsageDto } from './subscription.dto';
+import { NotFoundException, BadRequestException } from '../../common/exceptions';
+import { SubscriptionStatus, BillingInterval } from '../../common/enums';
+
+function resolveProvider(): string {
+  return process.env.DEFAULT_PAYMENT_PROVIDER ?? 'stripe';
+}
+
+function nextPeriod(from: Date, interval: BillingInterval | null | undefined, count: number | null | undefined): Date {
+  const next = new Date(from);
+  const n = count && count > 0 ? count : 1;
+  if (!interval) return next;
+  switch (interval) {
+    case BillingInterval.DAY:  next.setDate(next.getDate() + n); break;
+    case BillingInterval.WEEK: next.setDate(next.getDate() + n * 7); break;
+    case BillingInterval.MONTH: next.setMonth(next.getMonth() + n); break;
+    case BillingInterval.YEAR: next.setFullYear(next.getFullYear() + n); break;
+  }
+  return next;
+}
 
 export class SubscriptionService {
   async create(
@@ -13,36 +30,78 @@ export class SubscriptionService {
     dto: CreateSubscriptionDto
   ) {
     const plan = await planService.findById(dto.planId, tenantId);
-
-    const tenant = await tenantRepository.findById(tenantId);
-    if (!tenant) {
-      throw new NotFoundException('Tenant not found');
+    if (!plan.productId) {
+      throw new BadRequestException('Plan must be published before subscriptions can be created');
     }
 
-    if (!tenant.paymentProvider) {
-      throw new BadRequestException(
-        'Tenant has not configured a payment provider. Set tenant.paymentProvider first.'
-      );
+    const primaryPrice = await planPriceRepository.findById(dto.planPriceId);
+    if (!primaryPrice || primaryPrice.planId !== plan.id) {
+      throw new NotFoundException('PlanPrice not found for this plan');
+    }
+    if (primaryPrice.type !== 'RECURRING') {
+      throw new BadRequestException('planPriceId must be a RECURRING price; one-time prices go in addons[]');
+    }
+    if (!primaryPrice.gatewayPriceId) {
+      throw new BadRequestException('PlanPrice must be published first');
     }
 
-    const gateway = getGateway(tenant.paymentProvider);
+    const addonPrices: { id: string; gatewayPriceId: string | null; type: string }[] = [];
+    for (const addonId of dto.addons ?? []) {
+      const p = await planPriceRepository.findById(addonId);
+      if (!p || p.planId !== plan.id) {
+        throw new NotFoundException(`Addon PlanPrice ${addonId} not found for this plan`);
+      }
+      if (!p.gatewayPriceId) {
+        throw new BadRequestException(`Addon PlanPrice ${addonId} must be published first`);
+      }
+      addonPrices.push({ id: p.id, gatewayPriceId: p.gatewayPriceId, type: p.type });
+    }
 
-    const periodStart = new Date();
-    const periodEnd = this.calculateNextPeriod(periodStart, plan.interval, plan.intervalCount);
+    const paymentProvider = resolveProvider();
+    const gateway = getGateway(paymentProvider);
+
+    // Approach A:
+    //   RECURRING addons → subscription items (paid each period)
+    //   ONE_TIME addons  → invoice items on the upcoming invoice (paid once)
+    const recurringAddonPrices = addonPrices.filter((a) => a.type === 'RECURRING');
+    const oneTimeAddonPrices = addonPrices.filter((a) => a.type === 'ONE_TIME');
+
+    const items = [
+      { gatewayPriceId: primaryPrice.gatewayPriceId! },
+      ...recurringAddonPrices.map((a) => ({ gatewayPriceId: a.gatewayPriceId! })),
+    ];
 
     const gatewaySub = await gateway.createSubscription({
       planId: plan.id,
-      gatewayPlanId: plan.gatewayPlanId ?? undefined,
       userId,
       paymentMethodId: dto.paymentMethodId,
+      items,
     });
+
+    // Attach one-time fees to the first invoice of this subscription.
+    // Must be done AFTER subscription creation so `subscription` is set on the invoice item.
+    for (const ot of oneTimeAddonPrices) {
+      await gateway.addInvoiceItem({
+        customerId: gatewaySub.customerId,
+        subscriptionId: gatewaySub.id,
+        priceId: ot.gatewayPriceId!,
+        quantity: 1,
+      });
+    }
+
+    // Determine the primary recurring cadence for local bookkeeping.
+    // Use the primary price's interval; fallback to monthly.
+    const periodStart = new Date();
+    const periodEnd = nextPeriod(periodStart, primaryPrice.interval as BillingInterval, primaryPrice.intervalCount);
 
     return subscriptionRepository.create({
       tenantId,
       userId,
       planId: plan.id,
+      planPriceId: primaryPrice.id,
+      addons: addonPrices.map((a) => a.id),
       status: SubscriptionStatus.ACTIVE,
-      gatewayProvider: tenant.paymentProvider,
+      gatewayProvider: paymentProvider,
       gatewaySubscriptionId: gatewaySub.id,
       gatewayCustomerId: gatewaySub.customerId,
       currentPeriodStart: periodStart,
@@ -69,11 +128,9 @@ export class SubscriptionService {
 
   async cancel(id: string, tenantId: string, dto: CancelSubscriptionDto) {
     const sub = await this.findById(id, tenantId);
-
     if (sub.status === SubscriptionStatus.CANCELLED) {
       throw new BadRequestException('Subscription already cancelled');
     }
-
     if (dto.immediately) {
       const gateway = getGateway(sub.gatewayProvider);
       await gateway.cancelSubscription(sub.gatewaySubscriptionId!, true);
@@ -82,7 +139,6 @@ export class SubscriptionService {
         cancelledAt: new Date(),
       });
     }
-
     const gateway = getGateway(sub.gatewayProvider);
     await gateway.cancelSubscription(sub.gatewaySubscriptionId!, false);
     return subscriptionRepository.update(id, {
@@ -114,27 +170,38 @@ export class SubscriptionService {
     });
   }
 
-  private calculateNextPeriod(
-    from: Date,
-    interval: string,
-    count: number
-  ): Date {
-    const next = new Date(from);
-    switch (interval) {
-      case 'DAY':
-        next.setDate(next.getDate() + count);
-        break;
-      case 'WEEK':
-        next.setDate(next.getDate() + count * 7);
-        break;
-      case 'MONTH':
-        next.setMonth(next.getMonth() + count);
-        break;
-      case 'YEAR':
-        next.setFullYear(next.getFullYear() + count);
-        break;
+  async recordUsage(id: string, tenantId: string, dto: RecordUsageDto) {
+    const sub = await this.findById(id, tenantId);
+    if (!sub.gatewaySubscriptionId) {
+      throw new BadRequestException('Subscription has no gateway ID; cannot record usage');
     }
-    return next;
+    const price = await planPriceRepository.findById(dto.planPriceId);
+    if (!price || price.planId !== sub.planId) {
+      throw new NotFoundException('PlanPrice not found for this subscription');
+    }
+    if (price.type !== 'RECURRING' || price.usageType !== 'METERED') {
+      throw new BadRequestException('PlanPrice must be RECURRING and METERED to record usage');
+    }
+    const gateway = getGateway(sub.gatewayProvider);
+    const stripeSub = await (gateway as any).stripe?.subscriptions?.retrieve?.(sub.gatewaySubscriptionId, {
+      expand: ['items.data.price'],
+    }).catch(() => null) as any;
+    let itemId: string | undefined;
+    if (stripeSub?.items?.data) {
+      itemId = stripeSub.items.data.find(
+        (it: any) => (typeof it.price === 'string' ? it.price : it.price.id) === price.gatewayPriceId
+      )?.id;
+    }
+    if (!itemId) {
+      throw new NotFoundException('No matching subscription item found on Stripe for this price');
+    }
+    await gateway.recordUsage({
+      subscriptionItemId: itemId,
+      quantity: dto.quantity,
+      timestamp: dto.timestamp ? new Date(dto.timestamp) : undefined,
+      action: dto.action,
+    });
+    return { ok: true };
   }
 }
 

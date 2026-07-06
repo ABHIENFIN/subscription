@@ -13,3 +13,15 @@ export const planRepository = {
   update: (id: string, data: any) => prisma.plan.update({ where: { id }, data }),
   delete: (id: string) => prisma.plan.delete({ where: { id } }),
 };
+
+export const planPriceRepository = {
+  findById: (id: string) => prisma.planPrice.findUnique({ where: { id } }),
+  findByPlan: (planId: string) =>
+    prisma.planPrice.findMany({
+      where: { planId },
+      orderBy: { createdAt: 'asc' },
+    }),
+  create: (data: any) => prisma.planPrice.create({ data }),
+  update: (id: string, data: any) => prisma.planPrice.update({ where: { id }, data }),
+  delete: (id: string) => prisma.planPrice.delete({ where: { id } }),
+};

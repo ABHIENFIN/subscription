@@ -8,12 +8,13 @@ import { errorHandler } from './middleware/errorHandler.middleware';
 import { generateOpenApiDocument } from './docs/openapi';
 import { getRedocHtml } from './docs/redoc.html';
 
+import planRoutes from './modules/plans/plan.routes';
+import subscriptionRoutes from './modules/subscriptions/subscription.routes';
+import customerRoutes from './modules/customers/customer.routes';
+import webhookRoutes from './modules/webhooks/webhook.routes';
 import authRoutes from './modules/auth/auth.routes';
 import tenantRoutes from './modules/tenants/tenant.routes';
 import userRoutes from './modules/users/user.routes';
-import planRoutes from './modules/plans/plan.routes';
-import subscriptionRoutes from './modules/subscriptions/subscription.routes';
-import webhookRoutes from './modules/webhooks/webhook.routes';
 
 export function createApp(): Express {
   const app = express();
@@ -41,12 +42,13 @@ export function createApp(): Express {
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiDocument, { customSiteTitle: 'Subscription Service API' }));
   app.get('/redoc', (_req, res) => res.type('html').send(getRedocHtml()));
 
+  app.use(`${appConfig.apiPrefix}/plans`, planRoutes);
+  app.use(`${appConfig.apiPrefix}/subscriptions`, subscriptionRoutes);
+  app.use(`${appConfig.apiPrefix}/customers`, customerRoutes);
+  app.use(`${appConfig.apiPrefix}/webhooks`, webhookRoutes);
   app.use(`${appConfig.apiPrefix}/auth`, authRoutes);
   app.use(`${appConfig.apiPrefix}/tenants`, tenantRoutes);
   app.use(`${appConfig.apiPrefix}/users`, userRoutes);
-  app.use(`${appConfig.apiPrefix}/plans`, planRoutes);
-  app.use(`${appConfig.apiPrefix}/subscriptions`, subscriptionRoutes);
-  app.use(`${appConfig.apiPrefix}/webhooks`, webhookRoutes);
 
   app.use(errorHandler);
 

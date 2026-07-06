@@ -44,11 +44,24 @@ export const PaginationQuery = z.object({
 }).openapi('PaginationQuery');
 
 // ---------------------------------------------------------------
-// Security scheme
+// Security schemes
 // ---------------------------------------------------------------
 export const bearerAuth = {
   type: 'http',
   scheme: 'bearer',
   bearerFormat: 'JWT',
   description: 'JWT issued by /auth/login or /auth/refresh',
+} as const;
+
+// Global tenant header, sent on every authenticated request alongside the
+// bearer token. Declared as a security scheme so Swagger UI / Redoc expose
+// it through the "Authorize" dialog (same UX as the JWT).
+export const tenantIdHeader = {
+  type: 'apiKey',
+  in: 'header',
+  name: 'X-Tenant-Id',
+  description:
+    'Tenant context for the request. Resolved in this order: ' +
+    '(1) this header, (2) req.tenantId set by tenantMiddleware, ' +
+    '(3) tenantId in the request body. UUID.',
 } as const;

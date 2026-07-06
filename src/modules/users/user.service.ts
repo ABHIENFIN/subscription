@@ -1,127 +1,94 @@
-import bcrypt from 'bcryptjs';
-import prisma from '../../config/database.config';
-import { userRepository } from './user.repository';
-import {
-  UpdateUserDto,
-  InviteUserDto,
-} from './user.dto';
-import {
-  ConflictException,
-  NotFoundException,
-  ForbiddenException,
-} from '../../common/exceptions';
+import { randomUUID } from 'crypto';
+import { UserResponse } from './user.dto';
 
-export class UserService {
-  async findById(id: string, requesterTenantId?: string) {
-    const user = await userRepository.findById(id);
-    if (!user) throw new NotFoundException('User not found');
+const now = () => new Date().toISOString();
 
-    if (
-      requesterTenantId &&
-      user.tenantId &&
-      user.tenantId !== requesterTenantId
-    ) {
-      throw new ForbiddenException('Cannot access users from other tenants');
+const seed: UserResponse[] = [
+  {
+    id: '00000000-0000-0000-0000-000000000001',
+    email: 'admin@example.com',
+    firstName: 'Admin',
+    lastName: 'User',
+    isActive: true,
+    createdAt: '2024-01-01T00:00:00.000Z',
+    roles: ['super_admin', 'platform_admin', 'tenant_owner', 'tenant_admin', 'billing_manager', 'developer', 'viewer'],
+    tenants: [{ tenantId: '00000000-0000-0000-0000-0000000000ac', role: 'tenant_owner' }],
+  },
+  {
+    id: '00000000-0000-0000-0000-000000000002',
+    email: 'alice@acme.test',
+    firstName: 'Alice',
+    lastName: 'Anderson',
+    isActive: true,
+    createdAt: '2024-02-01T00:00:00.000Z',
+    roles: ['tenant_admin'],
+    tenants: [{ tenantId: '00000000-0000-0000-0000-0000000000ac', role: 'tenant_admin' }],
+  },
+  {
+    id: '00000000-0000-0000-0000-000000000003',
+    email: 'bob@acme.test',
+    firstName: 'Bob',
+    lastName: 'Brown',
+    isActive: true,
+    createdAt: '2024-02-15T00:00:00.000Z',
+    roles: ['billing_manager'],
+    tenants: [{ tenantId: '00000000-0000-0000-0000-0000000000ac', role: 'billing_manager' }],
+  },
+];
+
+const store = new Map<string, UserResponse>(seed.map((u) => [u.id, u]));
+
+export const userService = {
+  list({ tenantId, skip = 0, take = 20 }: { tenantId?: string; skip?: number; take?: number } = {}): UserResponse[] {
+    let rows = Array.from(store.values());
+    if (tenantId) {
+      rows = rows.filter((u) => (u.tenants ?? []).some((t) => t.tenantId === tenantId));
     }
+    return rows
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(skip, skip + take);
+  },
+
+  findById(id: string): UserResponse | null {
+    return store.get(id) ?? null;
+  },
+
+  findByEmail(email: string): UserResponse | null {
+    for (const u of store.values()) {
+      if (u.email === email) return u;
+    }
+    return null;
+  },
+
+  create({
+    email,
+    firstName,
+    lastName,
+    tenantId,
+    role = 'viewer',
+  }: {
+    email: string;
+    firstName?: string;
+    lastName?: string;
+    tenantId: string;
+    role?: string;
+  }): UserResponse {
+    if (this.findByEmail(email)) {
+      const err = new Error('User with this email already exists');
+      (err as Error & { code: string }).code = 'UNIQUE_VIOLATION';
+      throw err;
+    }
+    const user: UserResponse = {
+      id: randomUUID(),
+      email,
+      firstName: firstName ?? null,
+      lastName: lastName ?? null,
+      isActive: true,
+      createdAt: now(),
+      roles: [role],
+      tenants: [{ tenantId, role }],
+    };
+    store.set(user.id, user);
     return user;
-  }
-
-  async listByTenant(tenantId: string, skip = 0, take = 20) {
-    return userRepository.findByTenant(tenantId, skip, take);
-  }
-
-  async update(id: string, dto: UpdateUserDto, requesterTenantId?: string) {
-    const user = await userRepository.findById(id);
-    if (!user) throw new NotFoundException('User not found');
-
-    if (
-      requesterTenantId &&
-      user.tenantId &&
-      user.tenantId !== requesterTenantId
-    ) {
-      throw new ForbiddenException('Cannot update users from other tenants');
-    }
-    return userRepository.update(id, dto);
-  }
-
-  async invite(tenantId: string, dto: InviteUserDto) {
-    const existing = await userRepository.findByEmail(dto.email);
-    if (existing) {
-      throw new ConflictException('User with this email already exists');
-    }
-
-    const tempPassword = await bcrypt.hash(Math.random().toString(36).slice(-12), 12);
-    const user = await prisma.user.create({
-      data: {
-        email: dto.email,
-        passwordHash: tempPassword,
-        firstName: dto.firstName,
-        lastName: dto.lastName,
-        tenantId,
-        status: 'INVITED',
-      },
-    });
-
-    for (const roleName of dto.roles) {
-      const role = await prisma.role.findUnique({ where: { name: roleName } });
-      if (role) {
-        await userRepository.assignRole(user.id, role.id);
-      }
-    }
-
-    return userRepository.findById(user.id);
-  }
-
-  async remove(id: string, requesterTenantId?: string) {
-    const user = await userRepository.findById(id);
-    if (!user) throw new NotFoundException('User not found');
-
-    if (
-      requesterTenantId &&
-      user.tenantId &&
-      user.tenantId !== requesterTenantId
-    ) {
-      throw new ForbiddenException('Cannot remove users from other tenants');
-    }
-    await userRepository.delete(id);
-  }
-
-  async assignRole(userId: string, roleName: string, requesterTenantId?: string) {
-    const user = await userRepository.findById(userId);
-    if (!user) throw new NotFoundException('User not found');
-
-    if (
-      requesterTenantId &&
-      user.tenantId &&
-      user.tenantId !== requesterTenantId
-    ) {
-      throw new ForbiddenException('Cannot assign roles to users from other tenants');
-    }
-
-    const role = await prisma.role.findUnique({ where: { name: roleName } });
-    if (!role) throw new NotFoundException(`Role ${roleName} not found`);
-
-    await userRepository.assignRole(userId, role.id);
-    return userRepository.findById(userId);
-  }
-
-  async removeRole(userId: string, roleName: string, requesterTenantId?: string) {
-    const user = await userRepository.findById(userId);
-    if (!user) throw new NotFoundException('User not found');
-
-    if (
-      requesterTenantId &&
-      user.tenantId &&
-      user.tenantId !== requesterTenantId
-    ) {
-      throw new ForbiddenException('Cannot remove roles from users in other tenants');
-    }
-
-    const role = await prisma.role.findUnique({ where: { name: roleName } });
-    if (!role) throw new NotFoundException(`Role ${roleName} not found`);
-
-    await userRepository.removeRole(userId, role.id);
-  }
-}
-
-export const userService = new UserService();
+  },
+};

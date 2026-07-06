@@ -1,8 +1,14 @@
 // Prisma schema for Subscription Microservice
-// Multi-tenant model with RBAC, plans, subscriptions, and payment tracking
+// Multi-tenant model with RBAC, plans, plan_prices, subscriptions, and payment tracking.
+// Plan model follows Approach A: one Product (per tier) holds many Prices (one per cadence).
+// Legacy fields on Plan (amount/currency/interval/gatewayPlanId) are kept for backwards
+// compatibility with rows created under the Approach B prototype.
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // `native` covers the developer machine (macOS).
+  // `debian-openssl-3.0.x` covers the Docker image (node:20-bookworm-slim).
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
@@ -11,120 +17,43 @@ datasource db {
 }
 
 // ============================================
-// TENANTS
-// ============================================
-model Tenant {
-  id                  String   @id @default(uuid())
-  name                String
-  slug                String   @unique
-  domain              String?  @unique
-  status              TenantStatus @default(ACTIVE)
-  paymentProvider     String?  // 'stripe' | 'paypal' | etc.
-  gatewayConfiguredAt DateTime?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
-
-  users          User[]
-  plans          Plan[]
-  subscriptions  Subscription[]
-  invoices       Invoice[]
-
-  @@map("tenants")
-}
-
-enum TenantStatus {
-  ACTIVE
-  SUSPENDED
-  DELETED
-}
-
-// ============================================
-// USERS
-// ============================================
-model User {
-  id           String   @id @default(uuid())
-  email        String   @unique
-  passwordHash String
-  firstName    String?
-  lastName     String?
-  status       UserStatus @default(ACTIVE)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  // Platform-level (no tenantId) vs tenant-level
-  tenantId     String?
-  tenant       Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
-  roles        UserRole[]
-  subscriptions Subscription[]
-
-  @@index([tenantId])
-  @@index([email])
-  @@map("users")
-}
-
-enum UserStatus {
-  ACTIVE
-  INVITED
-  SUSPENDED
-  DELETED
-}
-
-// ============================================
-// ROLES & RBAC
-// ============================================
-model Role {
-  id          String   @id @default(uuid())
-  name        String   @unique // 'super_admin', 'tenant_owner', etc.
-  scope       RoleScope
-  description String?
-  createdAt   DateTime @default(now())
-
-  userRoles   UserRole[]
-
-  @@map("roles")
-}
-
-enum RoleScope {
-  PLATFORM
-  TENANT
-}
-
-model UserRole {
-  id     String @id @default(uuid())
-  userId String
-  roleId String
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, roleId])
-  @@index([userId])
-  @@map("user_roles")
-}
-
-// ============================================
-// PLANS
+// PLANS (the marketing tier / product concept)
 // ============================================
 model Plan {
-  id              String   @id @default(uuid())
-  tenantId        String
-  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  name            String
-  description     String?
-  amount          Decimal  @db.Decimal(10, 2)
-  currency        String   @default("USD")
-  interval        BillingInterval
-  intervalCount   Int      @default(1)
-  trialDays       Int      @default(0)
-  gatewayPlanId   String?  // Provider-side plan ID (Stripe price ID, etc.)
-  isActive        Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id          String   @id @default(uuid())
+  tenantId    String
+  name        String
+  slug        String
+  description String?
+  productId   String?  // Stripe prod_... shared across this plan's prices
+  features    Json?    // Per-tier entitlement blob (doc §12.6)
+  status      PlanStatus @default(DRAFT)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  subscriptions   Subscription[]
+  // --- legacy fields (Approach B prototype) — kept for back-compat only ---
+  amount          Decimal? @db.Decimal(10, 2)
+  currency        String?  @default("USD")
+  interval        BillingInterval?
+  intervalCount   Int?
+  trialDays       Int?
+  gatewayPlanId   String?  // Legacy: was a Stripe price_... under Approach B
+  gatewaySyncedAt DateTime?
 
+  prices        PlanPrice[]
+  subscriptions Subscription[]
+
+  @@unique([tenantId, slug])
   @@index([tenantId])
+  @@index([status])
   @@map("plans")
+}
+
+enum PlanStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
 }
 
 enum BillingInterval {
@@ -135,16 +64,70 @@ enum BillingInterval {
 }
 
 // ============================================
+// PLAN PRICES (one Stripe price_... per cadence/feature)
+// Multiple prices live under one Plan (Approach A).
+// ============================================
+model PlanPrice {
+  id              String      @id @default(uuid())
+  planId          String
+  plan            Plan        @relation(fields: [planId], references: [id], onDelete: Cascade)
+  gatewayPriceId  String?     // Stripe price_... once published
+  amount          Int         // smallest currency unit (cents)
+  currency        String      @default("USD")
+  interval        BillingInterval?
+  intervalCount   Int         @default(1)
+  type            PriceType   @default(RECURRING)
+  usageType       UsageType   @default(LICENSED)
+  trialDays       Int         @default(0)
+  nickname        String?     // "monthly", "yearly", "setup", "per_call" — display only
+  status          PriceStatus @default(DRAFT)
+  gatewaySyncedAt DateTime?
+  isActive        Boolean     @default(true)
+
+  // --- USD snapshot (immutable, captured at create/publish) ---
+  // Display uses `amount` + `currency` (the user's original price, e.g. ₹299).
+  // Reporting uses `amountUsdCents` (the USD cents equivalent at capture time).
+  // FX fields are write-once; never recomputed.
+  amountUsdCents  Int?        // USD amount in cents (smallest unit). NULL only for legacy rows.
+  fxRate          Decimal?    @db.Decimal(18, 8) // foreign-per-USD (e.g. 83.50 INR per 1 USD). 1.0 for USD.
+  fxAsOf          DateTime?   // When the FX rate was captured
+  fxSource        String?     // "stripe" | "manual" — origin of the rate
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([planId])
+  @@index([status])
+  @@map("plan_prices")
+}
+
+enum PriceType {
+  RECURRING
+  ONE_TIME
+}
+
+enum UsageType {
+  LICENSED
+  METERED
+}
+
+enum PriceStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+// ============================================
 // SUBSCRIPTIONS
 // ============================================
 model Subscription {
   id                    String   @id @default(uuid())
   tenantId              String
-  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   userId                String
-  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   planId                String
   plan                  Plan     @relation(fields: [planId], references: [id])
+  planPriceId           String?  // Primary recurring price (Approach A)
+  addons                String[] @default([])  // Additional planPriceIds (one-time setup fees, etc.)
   status                SubscriptionStatus @default(ACTIVE)
   gatewayProvider       String   // 'stripe', 'paypal', etc.
   gatewaySubscriptionId String?  // Provider-side ID
@@ -158,7 +141,6 @@ model Subscription {
 
   invoices              Invoice[]
 
-  @@index([tenantId])
   @@index([userId])
   @@index([status])
   @@map("subscriptions")
@@ -179,7 +161,6 @@ enum SubscriptionStatus {
 model Invoice {
   id                String   @id @default(uuid())
   tenantId          String
-  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   subscriptionId    String?
   subscription      Subscription? @relation(fields: [subscriptionId], references: [id])
   amount            Decimal  @db.Decimal(10, 2)

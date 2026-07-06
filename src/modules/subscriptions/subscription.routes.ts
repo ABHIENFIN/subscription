@@ -44,4 +44,10 @@ router.post(
   (req, res, next) => subscriptionController.resume(req, res, next)
 );
 
+router.post(
+  '/:id/usage',
+  requireRoles('tenant_owner', 'tenant_admin', 'billing_manager'),
+  (req, res, next) => subscriptionController.recordUsage(req, res, next)
+);
+
 export default router;

@@ -4,10 +4,18 @@ import {
   CreateSubscriptionDto,
   UpdateSubscriptionDto,
   CreateInvoiceDto,
+  CreateGatewayPlanDto,
+  CreateGatewayProductDto,
+  CreateGatewayPriceDto,
+  RecordUsageDto,
+  AddInvoiceItemDto,
   GatewayCustomer,
   GatewayPaymentMethod,
   GatewaySubscription,
   GatewayInvoice,
+  GatewayPlan,
+  GatewayProduct,
+  GatewayPrice,
   GatewayWebhookEvent,
 } from '../gateway.interface';
 
@@ -21,6 +29,21 @@ export class RazorpayGateway implements IPaymentGateway {
     throw new Error('RazorpayGateway not yet implemented');
   }
   async getCustomer(_customerId: string): Promise<GatewayCustomer> {
+    throw new Error('RazorpayGateway not yet implemented');
+  }
+  async createPlan(_data: CreateGatewayPlanDto): Promise<GatewayPlan> {
+    throw new Error('RazorpayGateway not yet implemented');
+  }
+  async createProduct(_data: CreateGatewayProductDto): Promise<GatewayProduct> {
+    throw new Error('RazorpayGateway not yet implemented');
+  }
+  async createPrice(_data: CreateGatewayPriceDto): Promise<GatewayPrice> {
+    throw new Error('RazorpayGateway not yet implemented');
+  }
+  async recordUsage(_data: RecordUsageDto): Promise<void> {
+    throw new Error('RazorpayGateway not yet implemented');
+  }
+  async addInvoiceItem(_data: AddInvoiceItemDto): Promise<void> {
     throw new Error('RazorpayGateway not yet implemented');
   }
   async attachPaymentMethod(_customerId: string, _token: string): Promise<GatewayPaymentMethod> {
